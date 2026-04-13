@@ -285,6 +285,49 @@ func TestGitLabRegistryClient_getGitLabAPIBaseURL(t *testing.T) {
 	}
 }
 
+func TestGitLabRegistryClient_discoverRegistryHost_integration(t *testing.T) {
+	const registryActualHost = "gitlab-si-reg.example.test"
+	const repoPath = "group/myproject"
+
+	// Fake GitLab API server that returns location pointing to registryActualHost
+	gitlabAPIMux := http.NewServeMux()
+	gitlabAPIMux.HandleFunc("/api/v4/projects", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]gitLabProject{{ID: 1, PathWithNamespace: "group"}})
+	})
+	gitlabAPIMux.HandleFunc("/api/v4/projects/1/registry/repositories", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		repos := []gitLabRepository{{
+			ID:       10,
+			Path:     repoPath,
+			Location: fmt.Sprintf("%s/%s", registryActualHost, repoPath),
+		}}
+		_ = json.NewEncoder(w).Encode(repos)
+	})
+	gitlabAPIServer := httptest.NewServer(gitlabAPIMux)
+	defer gitlabAPIServer.Close()
+
+	// RegistryURL is the full API server URL including scheme (simulating the GitLab web URL the user entered)
+	reg := &armotypes.GitlabImageRegistry{
+		RegistryURL: gitlabAPIServer.URL,
+	}
+	reg.Repositories = []string{repoPath}
+	client := &GitLabRegistryClient{
+		Registry: reg,
+		Options:  &common.RegistryOptions{},
+	}
+
+	// Verify discoverRegistryHost returns the actual registry host
+	discoveredHost, err := client.discoverRegistryHost(context.Background())
+	if err != nil {
+		t.Fatalf("discoverRegistryHost() error: %v", err)
+	}
+	if discoveredHost != registryActualHost {
+		t.Errorf("discoverRegistryHost() = %q, want %q", discoveredHost, registryActualHost)
+	}
+
+}
+
 func TestGitLabRegistryClient_discoverRegistryHost(t *testing.T) {
 	tests := []struct {
 		name              string

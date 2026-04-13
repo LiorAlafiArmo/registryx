@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,8 +19,9 @@ import (
 )
 
 type GitLabRegistryClient struct {
-	Registry *armotypes.GitlabImageRegistry
-	Options  *common.RegistryOptions
+	Registry               *armotypes.GitlabImageRegistry
+	Options                *common.RegistryOptions
+	discoveredRegistryHost string // cached result from discoverRegistryHost; empty means not yet discovered
 }
 
 // GitLabProject represents a GitLab project from the API
@@ -261,8 +263,24 @@ func extractHostFromLocation(location string) string {
 	return ""
 }
 
-func (g *GitLabRegistryClient) GetImagesToScan(_ context.Context) (map[string]string, error) {
-	registry, err := name.NewRegistry(g.Registry.RegistryURL)
+func (g *GitLabRegistryClient) GetImagesToScan(ctx context.Context) (map[string]string, error) {
+	// Auto-discover the actual container registry hostname via the GitLab API.
+	// Self-hosted GitLab instances can have a separate registry hostname
+	// (e.g. "gitlab-si-reg.hefr.ch") that differs from the GitLab web URL
+	// ("gitlab-si.hefr.ch"). Using the web URL for registry ops returns
+	// service=dependency_proxy in the auth challenge, causing 403 errors.
+	// The result is cached so subsequent calls don't repeat the API round-trips.
+	registryHost := g.Registry.RegistryURL
+	if g.discoveredRegistryHost != "" {
+		registryHost = g.discoveredRegistryHost
+	} else if discoveredHost, err := g.discoverRegistryHost(ctx); err != nil {
+		log.Printf("gitlab registry: failed to discover registry host, falling back to RegistryURL %q: %v", g.Registry.RegistryURL, err)
+	} else if discoveredHost != "" {
+		g.discoveredRegistryHost = discoveredHost
+		registryHost = discoveredHost
+	}
+
+	registry, err := name.NewRegistry(registryHost)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +296,7 @@ func (g *GitLabRegistryClient) GetImagesToScan(_ context.Context) (map[string]st
 			return nil, err
 		}
 		if tag != "" {
-			images[fmt.Sprintf("%s/%s", g.Registry.RegistryURL, repository)] = tag
+			images[fmt.Sprintf("%s/%s", registryHost, repository)] = tag
 		}
 	}
 	return images, nil
